@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
 use rand::{rng, seq::IndexedRandom};
-use crate::AppState;
+use crate::state::AppState;
 use crate::models::link::Link;
 
 /// 点击量同步

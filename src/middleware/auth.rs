@@ -7,7 +7,11 @@ use axum::{
 };
 use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
 use std::sync::Arc;
-use crate::{AppState, models::user::User, services::Claims};
+use crate::{
+    state::AppState, 
+    models::user::User, 
+    services::Claims
+};
 use rand::{rng, seq::IndexedRandom};
 use redis::AsyncCommands;
 
@@ -46,14 +50,18 @@ pub async fn jwt_auth(
     let manager = state.managers
         .choose(&mut rng())
         .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into()))?;
-    let mut conn = manager.lock().await;
 
-    let exists: bool = conn.exists(&key).await.map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis err: {}", e))
-    })?;
+    // 构建作用域，让 conn 在作用域结束时自动释放
+    {
+        let mut conn = manager.lock().await;
 
-    if !exists {
-        return Err((StatusCode::UNAUTHORIZED, "Token expired".into()));
+        let exists: bool = conn.exists(&key).await.map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis err: {}", e))
+        })?;
+
+        if !exists {
+            return Err((StatusCode::UNAUTHORIZED, "Token expired".into()));
+        }
     }
     
     let user = match User::find_user(
@@ -70,6 +78,5 @@ pub async fn jwt_auth(
     }
 
     req.extensions_mut().insert(user);
-
     Ok(next.run(req).await)
 }

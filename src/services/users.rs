@@ -5,7 +5,11 @@ use jsonwebtoken::{encode, EncodingKey, Header};
 use rand::{rng, seq::IndexedRandom};
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
-use crate::{AppState, models::user::User, models::session::create_session};
+use crate::{
+    state::AppState, 
+    models::user::User, 
+    models::session::create_session
+};
 
 
 #[derive(Serialize, Deserialize)]
@@ -16,10 +20,10 @@ pub struct Claims {
 }
 
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct LoginResp {
-    token: String,
-    nickname: Option<String>,
+    pub token: String,
+    pub nickname: Option<String>,
 }
 
 pub struct UserService;

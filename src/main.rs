@@ -2,33 +2,19 @@ use std::{sync::Arc, net::SocketAddr};
 
 use axum::{routing::{get, post}, Router};
 use tokio::{net::TcpListener, sync::{Mutex, RwLock}};
-use config::AppConfig;
-use sqlx::MySqlPool;
-use redis::aio::ConnectionManager;
-use tracing_subscriber;
+use tracing_subscriber::fmt::time::LocalTime;
 use tower_http::trace::TraceLayer;
 
-mod models;
-mod services;
-mod config;
-mod handlers;
-mod middleware;
-
-use models::db;
-use handlers::{shortlink, users};
-use middleware::{jwt_auth, ip_rate_limiter, user_rate_limiter};
-use services::{
+use tokio_shortlink::models::db;
+use tokio_shortlink::config::AppConfig;
+use tokio_shortlink::state::AppState;
+use tokio_shortlink::handlers::{shortlink, users};
+use tokio_shortlink::middleware::{jwt_auth, ip_rate_limiter, user_rate_limiter};
+use tokio_shortlink::services::{
     spawn_click_count_sync, 
     spawn_visit_log_sync, 
     spawn_expired_links_delete
 };
-
-
-pub struct AppState {
-    pub mysql_pool: MySqlPool,
-    pub managers: Vec<Mutex<ConnectionManager>>,
-    pub config: RwLock<AppConfig>,
-}
 
 
 #[tokio::main]
@@ -39,8 +25,10 @@ async fn main() {
     let redis = db::new_redis_client(&cfg.redis_url).await.unwrap();
     let addr = cfg.addr.clone();
 
-    // 初始化全局日志
-    tracing_subscriber::fmt::init();
+    // 初始化全局日志（本地时区，RFC3339 格式）
+    tracing_subscriber::fmt()
+        .with_timer(LocalTime::rfc_3339())
+        .init();
 
     // 初始化 4 条 Redis 连接并包进 Arc<Mutex<_>>
     let mut managers = Vec::new();

@@ -1,7 +1,11 @@
 use rand::{rng, seq::IndexedRandom};
 use axum::http::StatusCode;
 use redis::aio::ConnectionManager;
-use crate::{handlers::shortlink::LinkQuery, models::link::{Link, LinkDto}, AppState};
+use crate::{
+    handlers::shortlink::LinkQuery, 
+    models::link::{Link, LinkDto}, 
+    state::AppState
+};
 
 
 pub struct ShortlinkService;
@@ -74,7 +78,9 @@ impl ShortlinkService {
                         break;
                     }
                     Err((StatusCode::CONFLICT, _)) => continue, // 短码碰撞，重试
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        return Err(e);
+                    }
                 }
             }
 
@@ -85,6 +91,10 @@ impl ShortlinkService {
                 ));
             }
         }
+
+        tx.commit().await.map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("DB Commit error: {}", e))
+        })?;
 
         // 随机选择一个 Redis 连接
         let manager = state.managers

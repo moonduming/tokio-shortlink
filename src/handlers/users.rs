@@ -2,7 +2,10 @@ use axum::{extract::{ConnectInfo, State}, http::StatusCode, Json};
 use serde::Deserialize;
 use validator::Validate;
 use std::{sync::Arc, net::SocketAddr};
-use crate::{AppState, services::{UserService, LoginResp}};
+use crate::{
+    state::AppState, 
+    services::{UserService, LoginResp}
+};
 
 
 #[derive(Deserialize, Debug, Validate)]
