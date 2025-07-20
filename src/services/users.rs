@@ -5,6 +5,7 @@ use jsonwebtoken::{encode, EncodingKey, Header};
 use rand::{rng, seq::IndexedRandom};
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
+use tracing::warn;
 use crate::{
     state::AppState, 
     models::user::User, 
@@ -54,6 +55,7 @@ impl UserService {
         
         // 判断邮箱是否已经注册
         if User::exists_by_email(&state.mysql_pool, email).await? {
+            warn!("register: email already registered: email={}", email);
             return Err((StatusCode::BAD_REQUEST, "Email already registered".into()));
         }
         // 生成随机盐加密密码
@@ -62,6 +64,7 @@ impl UserService {
         let hashed_pwd = argon2
             .hash_password(password.as_bytes(), &salt)
             .map_err(|e| {
+                warn!("register: password encryption failed: email={}, err={}", email, e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR, 
                     format!("Password encryption failed: {}", e)
@@ -86,7 +89,10 @@ impl UserService {
         // 根据邮箱查询用户
         let user = match User::find_user(&state.mysql_pool, None, Some(email)).await? {
             Some(user) => user,
-            None => return Err((StatusCode::NOT_FOUND, "User not found".into())),
+            None => {
+                warn!("login: user not found: email={}", email);
+                return Err((StatusCode::NOT_FOUND, "User not found".into()))
+            },
         };
 
         let manager = state.managers
@@ -116,6 +122,7 @@ impl UserService {
         // 验证密码 (argon2)
         let parsed_hash = PasswordHash::new(&user.password)
             .map_err(|_| {
+                warn!("login: password hash parse failed: email={}", email);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR, 
                     "Password hash parse failed".into()
@@ -125,6 +132,7 @@ impl UserService {
         let argon2 = Argon2::default();
         // 验证密码失败时记录失败并返回
         if let Err(_) = argon2.verify_password(password.as_bytes(), &parsed_hash) {
+            warn!("login: invalid password: email={}", email);
             let user_login_fail_ttl = config.user_login_fail_ttl;
             let ip_user_login_fail_ttl = config.ip_user_login_fail_ttl;
             User::record_login_fail(
@@ -140,7 +148,7 @@ impl UserService {
 
         let ttl = config.user_token_ttl;
 
-        // 生成 JWT (有效期 1 天)
+        // 生成 JWT
         let exp = chrono::Utc::now()
             .checked_add_signed(chrono::Duration::seconds(ttl))
             .unwrap()
@@ -150,6 +158,7 @@ impl UserService {
 
         // 保存 JWT ID 到 redis
         create_session(
+            config.user_token_limit,
             user.id,
             ttl, 
             &jti,
@@ -169,6 +178,7 @@ impl UserService {
             &EncodingKey::from_secret(config.jwt_secret.as_bytes())
         )
         .map_err(|e| {
+            warn!("login: JWT encode failed: email={}, err={}", email, e);
             (StatusCode::INTERNAL_SERVER_ERROR, format!("JWT err: {}", e))
         })?;
 

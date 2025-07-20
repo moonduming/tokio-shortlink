@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use tracing::{error, info};
 use tokio::time::{interval, Duration};
 use rand::{rng, seq::IndexedRandom};
 use crate::state::AppState;
@@ -11,13 +12,13 @@ pub async fn spawn_click_count_sync(state: Arc<AppState>) {
         let mut ticker = interval(Duration::from_secs(900));
         loop {
             ticker.tick().await;
-            tracing::info!("Syncing click counts start");
+            info!("Syncing click counts start");
 
             // 随机选择一个 Redis 连接
             let manager = match state.managers.choose(&mut rng()) {
                 Some(manager) => manager,
                 None => {
-                    tracing::error!("No Redis manager");
+                    error!("No Redis manager(click_count_sync)");
                     continue
                 },
             };
@@ -29,10 +30,10 @@ pub async fn spawn_click_count_sync(state: Arc<AppState>) {
                 &mut conn,
                 100
             ).await {
-                tracing::error!("Failed to sync click counts: {:?}", e);
+                error!("Failed to sync click counts: {:?}", e);
             }
 
-            tracing::info!("Synced click counts end");
+            info!("Synced click counts end");
         }
     });
 }
@@ -45,13 +46,13 @@ pub async fn spawn_visit_log_sync(state: Arc<AppState>) {
         let mut ticker = interval(Duration::from_secs(1200));
         loop {
             ticker.tick().await;
-            tracing::info!("Syncing visit logs start");
+            info!("Syncing visit logs start");
 
             // 随机选择一个 Redis 连接
             let manager = match state.managers.choose(&mut rng()) {
                 Some(manager) => manager,
                 None => {
-                    tracing::error!("No Redis manager(vist_log_sync)");
+                    error!("No Redis manager(vist_log_sync)");
                     continue
                 },
             };
@@ -63,10 +64,10 @@ pub async fn spawn_visit_log_sync(state: Arc<AppState>) {
                 &mut conn,
                 100
             ).await {
-                tracing::error!("Failed to sync visit logs: {:?}", e);
+                error!("Failed to sync visit logs: {:?}", e);
             }
 
-            tracing::info!("Synced visit logs end");
+            info!("Synced visit logs end");
         }
     });
 }
@@ -79,16 +80,16 @@ pub async fn spawn_expired_links_delete(state: Arc<AppState>) {
         let mut ticker = interval(Duration::from_secs(1800));
         loop {
             ticker.tick().await;
-            tracing::info!("Syncing expired links start");
+            info!("Syncing expired links start");
 
             // 同步访问日志
             if let Err(e) = Link::delete_expired_links(
                 &state.mysql_pool, 
             ).await {
-                tracing::error!("Failed to delete expired links: {:?}", e);
+                error!("Failed to delete expired links: {:?}", e);
             }
 
-            tracing::info!("Synced expired links end");
+            info!("Synced expired links end");
         }
     });
 }

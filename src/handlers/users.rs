@@ -6,6 +6,7 @@ use crate::{
     state::AppState, 
     services::{UserService, LoginResp}
 };
+use tracing::warn;
 
 
 #[derive(Deserialize, Debug, Validate)]
@@ -37,6 +38,7 @@ pub async fn register(
 ) -> Result<(), (StatusCode, String)> {
     let ip = addr.ip().to_string();
     payload.validate().map_err(|e| {
+        warn!("register: 用户注册参数校验失败: ip={}, email={}, error={}", ip, payload.email, e);
         (StatusCode::BAD_REQUEST, format!("Validation error: {}", e))
     })?;
 
@@ -58,11 +60,11 @@ pub async fn login(
     ConnectInfo(addr): ConnectInfo<SocketAddr>, 
     Json(payload): Json<LoginPayload>,
 ) -> Result<Json<LoginResp>, (StatusCode, String)> {
+    let ip: String = addr.ip().to_string();
     payload.validate().map_err(|e| {
+        warn!("login: 用户登录参数校验失败: ip={}, email={}, error={}", ip, payload.email, e);
         (StatusCode::BAD_REQUEST, format!("Validation error: {}", e))
     })?;
-
-    let ip = addr.ip().to_string();
 
     let resp = UserService::login(
         &state, 

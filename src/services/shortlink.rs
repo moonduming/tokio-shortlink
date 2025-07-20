@@ -1,9 +1,10 @@
+use tracing::warn;
 use rand::{rng, seq::IndexedRandom};
 use axum::http::StatusCode;
 use redis::aio::ConnectionManager;
 use crate::{
     handlers::shortlink::LinkQuery, 
-    models::link::{Link, LinkDto}, 
+    models::link::{Link, LinkView}, 
     state::AppState
 };
 
@@ -42,6 +43,7 @@ impl ShortlinkService {
             .begin()
             .await
             .map_err(|e| {
+                warn!("create_shortlink: DB Begin error: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("DB Begin error: {}", e))
             })?;
 
@@ -63,6 +65,7 @@ impl ShortlinkService {
             match Link::update_short_code(&mut tx, id, &short_code).await {
                 Ok(_) => {}
                 Err((StatusCode::CONFLICT, _)) => {
+                    warn!("create_shortlink: 用户自定义短码已存在: user_id={}, short_code={}", user_id, short_code);
                     // 用户自定义短码已存在
                     return Err((StatusCode::BAD_REQUEST, "Short code already exists".into()));
                 }
@@ -85,6 +88,7 @@ impl ShortlinkService {
             }
 
             if short_code.is_empty() {
+                warn!("create_shortlink: 100 次自动生成短码均碰撞，无法生成唯一短码，user_id={}", user_id);
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Unable to generate unique short code".into(),
@@ -93,13 +97,17 @@ impl ShortlinkService {
         }
 
         tx.commit().await.map_err(|e| {
+            warn!("create_shortlink: DB Commit error: {}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, format!("DB Commit error: {}", e))
         })?;
 
         // 随机选择一个 Redis 连接
         let manager = state.managers
             .choose(&mut rng())
-            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into()))?;
+            .ok_or(     {
+                warn!("create_shortlink: No Redis manager");
+                (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
+            })?;
 
         let mut conn = manager.lock().await;
     
@@ -167,7 +175,10 @@ impl ShortlinkService {
         // 随机选择一个 Redis 连接
         let manager = state.managers
             .choose(&mut rng())
-            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into()))?;
+            .ok_or(     {
+                warn!("get_long_url: No Redis manager");
+                (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
+            })?;
 
         let mut conn = manager.lock().await;
         
@@ -199,6 +210,7 @@ impl ShortlinkService {
             let ttl = expire.and_utc().timestamp() - now_ts;
             // 已过期
             if ttl <= 0 {
+                warn!("get_long_url: link expired: short_code={}", short_code);
                 return Err((StatusCode::NOT_FOUND, "Link expired".into()));
             }
 
@@ -231,7 +243,7 @@ impl ShortlinkService {
         filter: &LinkQuery,
         limit: u64,
         offset: u64,
-    ) -> Result<(Vec<LinkDto>, i64), (StatusCode, String)> {
+    ) -> Result<(Vec<LinkView>, i64), (StatusCode, String)> {
         let (links, count) = Link::find_links(
             &state.mysql_pool,
             filter,
@@ -249,7 +261,10 @@ impl ShortlinkService {
     ) -> Result<(), (StatusCode, String)> {
         let manager = state.managers
             .choose(&mut rng())
-            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into()))?;
+            .ok_or(     {
+                warn!("delete_links: No Redis manager");
+                (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
+            })?;
 
         let mut conn = manager.lock().await;
         Link::delete_links(
@@ -267,18 +282,21 @@ impl ShortlinkService {
         state: &AppState,
         short_code: &str,
         user_id: u64,
+        tz_offset: i32,
         days: u8,
     ) -> Result<Vec<(String, i64)>, (StatusCode, String)> {
         // 校验days 是否超过最大值
         let max_days = state.config.read().await.max_stats_days;
         
         if days > max_days {
+            warn!("get_link_stats: Days exceeds maximum allowed: days={}, max_days={}, short_code={}, user_id={}", days, max_days, short_code, user_id);
             return Err((StatusCode::BAD_REQUEST, "Days exceeds maximum allowed".into()));
         }
         
         Link::count_daily_visits_by_code(
             &state.mysql_pool,
             short_code,
+            tz_offset,
             user_id,
             days,
         ).await

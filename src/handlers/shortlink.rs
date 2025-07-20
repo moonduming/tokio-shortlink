@@ -7,15 +7,17 @@ use axum::{
 };
 use axum_extra::TypedHeader;
 use chrono::NaiveDateTime;
+use chrono::Duration;
 use headers::{UserAgent, Referer};
 use std::{sync::Arc, net::SocketAddr};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
+use tracing::warn;
 
 use crate::{
     state::AppState, 
     services::ShortlinkService, 
-    models::{user::User, link::LinkDto}
+    models::{user::User, link::LinkView}
 };
 
 
@@ -46,6 +48,17 @@ pub struct LinkQuery {
     pub click_count: Option<u64>, // 点击量
     pub date_from:    Option<NaiveDateTime>, // 日期范围
     pub date_to:      Option<NaiveDateTime>,
+    /// 客户端时区偏移（以分钟为单位，表示本地时间与UTC的差值）。
+    /// 例如：
+    ///   - 北京时间（UTC+8）传 480，西八区（UTC-8）传 -480，UTC 传 0。
+    ///   - 部分时区可能不是整小时，例如印度标准时间（UTC+5:30）传 330。
+    /// 该参数用于前端筛选日期范围时，将本地时间范围转换为UTC时间后进行查询。
+    /// 推荐前端通过 JS 获取方式为：-new Date().getTimezoneOffset()。
+    /// 
+    /// 如果未传此参数，后端默认按照UTC进行时间查询，可能导致跨时区用户查询不准确。
+    #[serde(default)]
+    #[validate(range(min = -1440, max = 1440, message = "Tz_offset must be between -1440 and 1440"))]
+    pub tz_offset: i32,
     // ---分页---
     #[validate(range(min = 1, max = 100, message = "Limit must be between 1 and 100"))]
     #[serde(default = "default_limit")]
@@ -60,7 +73,7 @@ fn default_limit() -> u64 { 10 }
 /// 返回数据
 #[derive(Serialize)]
 pub struct LinkList {
-    pub links: Vec<LinkDto>,
+    pub links: Vec<LinkView>,
     pub count: i64,
 }
 
@@ -79,7 +92,10 @@ pub struct LinkStatsQuery {
     pub short_code: String,   // 必填：要统计哪条短链
     #[serde(default = "default_days")]
     #[validate(range(min = 1, message = "Days must be greater than 0"))]
-    pub days: u8,             // 选填：统计最近多少天
+    pub days: u8, 
+    #[serde(default)]
+    #[validate(range(min = -1440, max = 1440, message = "Tz_offset must be between -1440 and 1440"))]
+    pub tz_offset: i32, // 选填：时区偏移
 }
 
 fn default_days() -> u8 { 30 }
@@ -93,6 +109,7 @@ pub async fn create(
 ) -> Result<Json<ShortlinkCreateResp>, (StatusCode, String)> {
     // 校验 url
     if let Err(e) = payload.validate() {
+        warn!("create_shortlink: 参数校验失败: user_id={}, error={}", user.id, e);
         return Err((StatusCode::BAD_REQUEST, format!("Validation error: {}", e)));
     }
 
@@ -104,6 +121,7 @@ pub async fn create(
     let ttl = match payload.ttl {
         Some(ttl) => {
             if ttl < min_ttl || ttl > max_ttl {
+                warn!("create_shortlink: TTL越界: user_id={}, ttl={}, min={}, max={}", user.id, ttl, min_ttl, max_ttl);
                 return Err((
                     StatusCode::BAD_REQUEST, 
                     format!("TTL must be between {} and {}", min_ttl, max_ttl)
@@ -154,7 +172,23 @@ pub async fn list_links(
     Extension(user): Extension<User>,
     Query(mut q): Query<LinkQuery>,
 ) -> Result<Json<LinkList>, (StatusCode, String)> {
+    // 校验查询参数
+    if let Err(e) = q.validate() {
+        warn!("list_links: 查询参数校验失败: user_id={}, error={}", user.id, e);
+        return Err((StatusCode::BAD_REQUEST, format!("Validation error: {}", e)));
+    }
+
     q.user_id = Some(user.id);
+    // 如果前端传了时区偏移, 将本地时间转换为 UTC 再查询
+    if q.tz_offset != 0 {
+        let offset = Duration::minutes(q.tz_offset.into());
+        if let Some(df) = q.date_from {
+            q.date_from = Some(df - offset);
+        }
+        if let Some(dt) = q.date_to {
+            q.date_to = Some(dt - offset);
+        }
+    }
     let (links, count) = ShortlinkService::list_links(
         &state,
         &q,
@@ -186,13 +220,18 @@ pub async fn get_link_stats(
     Extension(user): Extension<User>,
     Query(q): Query<LinkStatsQuery>,
 ) -> Result<Json<Vec<(String, i64)>>, (StatusCode, String)> {
+    if let Err(e) = q.validate() {
+        warn!("get_link_stats: 查询参数校验失败: user_id={}, error={}", user.id, e);
+        return Err((StatusCode::BAD_REQUEST, format!("Validation error: {}", e)));
+    }
+
     let stats = ShortlinkService::get_link_stats(
         &state,
         &q.short_code,
         user.id,
+        q.tz_offset,
         q.days,
     ).await?;
 
     Ok(Json(stats))
 }
-

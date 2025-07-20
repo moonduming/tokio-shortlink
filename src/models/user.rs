@@ -2,6 +2,7 @@ use serde::{Serialize, Deserialize};
 use sqlx::MySqlPool;
 use axum::http::StatusCode;
 use redis::{aio::ConnectionManager, AsyncCommands};
+use tracing::warn;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct User {
@@ -26,6 +27,7 @@ impl User {
         .fetch_optional(mysql_pool)
         .await
         .map_err(|e| {
+            warn!("exists_by_email: DB select error: email={}, err={}", email, e);
             (StatusCode::INTERNAL_SERVER_ERROR, format!("DB select error: {}", e))
         })?
         .is_some();
@@ -49,6 +51,7 @@ impl User {
         .execute(mysql_pool)
         .await
         .map_err(|e| {
+            warn!("create: DB insert error: email={}, err={}", email, e);
             (StatusCode::INTERNAL_SERVER_ERROR, format!("DB insert error: {}", e))
         })?;
 
@@ -83,6 +86,7 @@ impl User {
                 .await
             }
             _ => {
+                warn!("find_user: 参数错误: id={:?}, email={:?}", id, email);
                 return Err((
                     StatusCode::BAD_REQUEST,
                     "Invalid parameters: require either id or email".into(),
@@ -90,6 +94,7 @@ impl User {
             }
         }
         .map_err(|e| {
+            warn!("find_user: DB select error: id={:?}, email={:?}, err={}", id, email, e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("DB select error: {e}"),
@@ -105,6 +110,7 @@ impl User {
         key: &str,
     ) -> Result<i64, (StatusCode, String)> {
         let cnt = redis_mgr.get::<_,Option<i64>>(key).await.map_err(|e| {
+            warn!("read_count: Redis get error: key={}, err={}", key, e);
             (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis get error: {}", e))
         })?.unwrap_or(0);
 
@@ -130,6 +136,7 @@ impl User {
         .incr(&key, 1)
         .await
         .map_err(|e| {
+            warn!("incr_count: Redis Incr err: key={}, err={}", key, e);
             (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis Incr err: {}", e))
         })?;
 
@@ -138,6 +145,7 @@ impl User {
             let _: () = redis_mgr.expire(&key, ttl)
             .await
             .map_err(|e| {
+                warn!("incr_count: Redis Expire err: key={}, err={}", key, e);
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis Expire err: {}", e))
             })?;
         }
@@ -159,6 +167,7 @@ impl User {
             user_fail_key, 
             user_login_fail_limit,
         ).await? {
+            warn!("can_login: 用户登录被限流: user_fail_key={}", user_fail_key);
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 "Account temporarily locked due to multiple failed login attempts".into(),
@@ -170,6 +179,7 @@ impl User {
             ip_user_fail_key, 
             ip_user_login_fail_limit,
         ).await? {
+            warn!("can_login: IP 登录被限流: ip_user_fail_key={}", ip_user_fail_key);
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many login attempts from this device, please try again later".into(),
@@ -211,12 +221,14 @@ impl User {
         let _: () = redis_mgr.del(user_fail_key)
         .await
         .map_err(|e| {
+            warn!("login_success: Redis Del err: key={}, err={}", user_fail_key, e);
             (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis Del err: {}", e))
         })?;
 
         let _: () = redis_mgr.del(ip_user_fail_key)
         .await
         .map_err(|e| {
+            warn!("login_success: Redis Del err: key={}, err={}", ip_user_fail_key, e);
             (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis Del err: {}", e))
         })?;
 
@@ -230,6 +242,7 @@ impl User {
         ip_register_key: &str,
     ) -> Result<(), (StatusCode, String)> {
         if Self::check_limit(redis_mgr, ip_register_key, ip_register_limit).await? {
+            warn!("can_register: 注册被限流: ip_register_key={}", ip_register_key);
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many registration attempts from this device, please try again later".into(),

@@ -1,9 +1,11 @@
 use redis::Script;
 use redis::aio::ConnectionManager;
 use axum::http::StatusCode;
+use tracing::warn;
 
 
 pub async fn create_session(
+    user_token_limit: u8,
     user_id: u64,
     expire_secs: i64,
     jti: &str,
@@ -21,7 +23,7 @@ pub async fn create_session(
         redis.call('RPUSH', KEYS[2], ARGV[2])
 
         local len = redis.call('LLEN', KEYS[2])
-        if len > 3 then
+        if len > tonumber(ARGV[3]) then
             local old_jti = redis.call('LPOP', KEYS[2])
             if old_jti then
                 redis.call('DEL', 'session:' .. old_jti)
@@ -35,14 +37,20 @@ pub async fn create_session(
         .key(list_key)
         .arg(expire_secs)
         .arg(jti)
+        .arg(user_token_limit)
         .invoke_async::<i32>(redis_mgr)
         .await
         .map_err(
-            |e| 
-            (
-                StatusCode::INTERNAL_SERVER_ERROR, 
-                format!("Redis error: {}", e)
-            )
+            |e| {
+                warn!(
+                    "create_session: Redis 调用失败: user_id={}, jti={}, err={}",
+                    user_id, jti, e
+                );
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR, 
+                    format!("Redis error: {}", e)
+                )
+            }
         )?;
 
     Ok(())

@@ -14,6 +14,7 @@ use crate::{
 };
 use rand::{rng, seq::IndexedRandom};
 use redis::AsyncCommands;
+use tracing::warn;
 
 
 pub async fn jwt_auth(
@@ -27,21 +28,27 @@ pub async fn jwt_auth(
         .get("Authorization")
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
-        .ok_or(
+        .ok_or({
+            warn!("jwt_auth: 缺少 Authorization header");
             (
                 StatusCode::UNAUTHORIZED, 
                 "Missing token".into()
             )
-        )?;
+        })?;
 
     // 校验 JWT 是否过期
-    let config = state.config.read().await;
+    let jwt_secret = {
+        let cfg = state.config.read().await;
+        cfg.jwt_secret.clone()
+    };
+    
     let claims = decode::<Claims>(
         token, 
-        &DecodingKey::from_secret(config.jwt_secret.as_bytes()), 
+        &DecodingKey::from_secret(jwt_secret.as_bytes()), 
         &Validation::new(Algorithm::HS256)
     )
     .map_err(|e| {
+        warn!("jwt_auth: JWT 校验失败: {}", e);
         (StatusCode::UNAUTHORIZED, format!("JWT err: {}", e))
     })?;
 
@@ -49,17 +56,22 @@ pub async fn jwt_auth(
     // 随机选择一个 Redis 连接
     let manager = state.managers
         .choose(&mut rng())
-        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into()))?;
+        .ok_or({
+            warn!("jwt_auth: 没有可用 Redis 连接池");
+            (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
+        })?;
 
     // 构建作用域，让 conn 在作用域结束时自动释放
     {
         let mut conn = manager.lock().await;
 
         let exists: bool = conn.exists(&key).await.map_err(|e| {
+            warn!("jwt_auth: Redis 查询失败: key={}, err={}", key, e);
             (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis err: {}", e))
         })?;
 
         if !exists {
+            warn!("jwt_auth: Redis session 不存在或已过期: key={}", key);
             return Err((StatusCode::UNAUTHORIZED, "Token expired".into()));
         }
     }
@@ -69,11 +81,15 @@ pub async fn jwt_auth(
         Some(claims.claims.sub), 
         None).await? {
             Some(user) => user,
-            None => return Err((StatusCode::NOT_FOUND, "User not found".into())),
+            None => {
+                warn!("jwt_auth: 用户不存在: user_id={}", claims.claims.sub);
+                return Err((StatusCode::NOT_FOUND, "User not found".into()));
+            },
         };
 
     
     if user.status != 1 {
+        warn!("jwt_auth: 用户已被禁用: user_id={}", user.id);
         return Err((StatusCode::UNAUTHORIZED, "User is disabled".into()));
     }
 

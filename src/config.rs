@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use config::{Config, Environment, ConfigError};
-use dotenvy::dotenv;
+use dotenvy;
+use std::env;
 
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
@@ -42,13 +43,17 @@ pub struct AppConfig {
     pub ip_register_ttl: i64,
     /// 用户限流
     pub user_rate_limit: i64,
+    /// 用户 token 限流
+    pub user_token_limit: u8,
     /// 用户限流时间窗口（秒）
     pub user_rate_limit_window: i64,
 }
 
 impl AppConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
-        dotenv().ok();
+        // 根据 ENV_FILE 环境变量指定的文件加载环境变量，默认使用 ".env"
+        let env_file = env::var("ENV_FILE").unwrap_or_else(|_| ".env".to_string());
+        dotenvy::from_filename(&env_file).ok();
         Config::builder()
             .add_source(Environment::default())
             .build()?

@@ -1,3 +1,4 @@
+use tracing::warn;
 use redis::{aio::ConnectionManager, AsyncCommands};
 use std::collections::HashMap;
 use sqlx::{
@@ -8,7 +9,7 @@ use sqlx::{
     Transaction
 };
 use axum::http::StatusCode;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
 use serde::Serialize;
 
 use crate::handlers::shortlink::LinkQuery;
@@ -37,6 +38,19 @@ pub struct LinkDto {
 }
 
 
+/// 只在返回 JSON 时使用
+#[derive(Serialize)]
+pub struct LinkView {
+    pub id: u64,
+    pub user_id: u64,
+    pub short_code: String,
+    pub long_url: String,
+    pub click_count: u64,
+    pub expire_at: Option<DateTime<FixedOffset>>,
+    pub created_at: DateTime<FixedOffset>,
+}
+
+
 pub struct Link;
 
 impl Link {
@@ -56,7 +70,10 @@ impl Link {
         .execute(tx.as_mut())
         .await
         .map_err(
-            |e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB insert error: {}", e))
+            |e| {
+                warn!("insert_long_url: DB insert error: {}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("DB insert error: {}", e))
+            }
         )?;
     
         Ok(insert_sql)
@@ -76,6 +93,7 @@ impl Link {
         .execute(tx.as_mut())
         .await
         .map_err(|e| {
+            warn!("update_short_code: DB update error: {}", e);
             if let sqlx::Error::Database(db_err) = &e {
                 if let Some(mysql_err) = db_err.try_downcast_ref::<MySqlDatabaseError>() {
                     // 1062 = Duplicate entry — violates UNIQUE constraint on short_code
@@ -102,6 +120,7 @@ impl Link {
         let _: () = redis_mgr.set_ex(&url_key, long_url, ttl as u64)
             .await
             .map_err(|e| {
+                warn!("set_shortlink: Redis set_ex error: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis set_ex error: {}", e))
             })?;
         
@@ -124,6 +143,7 @@ impl Link {
             .query_async(redis_mgr)
             .await
             .map_err(|e| {
+                warn!("set_click_count: Redis SET NX EX error: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis SET NX EX error: {}", e))
             })?;
         
@@ -141,7 +161,7 @@ impl Link {
             .await;
             
         if let Err(e) = result {
-            tracing::error!("Redis INCR error: {}", e);
+            warn!("Redis INCR error: {}", e);
         }
     }
 
@@ -170,7 +190,7 @@ impl Link {
         .await;
     
         if let Err(e) = result {
-            tracing::error!("Redis xadd error: {}", e);
+            warn!("log_visit_to_stream: Redis xadd error: {}", e);
         }
     }
 
@@ -186,6 +206,7 @@ impl Link {
             .get(&key)
             .await
             .map_err(|e| {
+                warn!("get_long_url_from_redis: Redis get error: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis get error: {}", e))
             })?;
         
@@ -204,6 +225,7 @@ impl Link {
         .fetch_optional(mysql_pool)
         .await
         .map_err(|e| {
+            warn!("get_logn_url_from_mysql: DB select error: {}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, format!("DB select error: {}", e))
         })?;
     
@@ -211,7 +233,10 @@ impl Link {
             Some(row) => {
                 Ok((row.long_url, row.expire_at))
             },
-            None => Err((StatusCode::NOT_FOUND, "Short code not found".into())),
+            None => {
+                warn!("get_logn_url_from_mysql: 短码不存在: short_code={}", short_code);
+                Err((StatusCode::NOT_FOUND, "Short code not found".into()))
+            },
         }
     }
 
@@ -234,6 +259,7 @@ impl Link {
                 .query_async(redis_mgr)
                 .await
                 .map_err(|e| {
+                    warn!("sync_click_counts: Redis scan error: {}", e);
                     (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis scan error: {}", e))
                 })?;
 
@@ -246,6 +272,7 @@ impl Link {
                         .get(&key)
                         .await
                         .map_err(|e| {
+                            warn!("sync_click_counts: Redis get error: {} code={}", e, code);
                             (
                                 StatusCode::INTERNAL_SERVER_ERROR, 
                                 format!("Redis get error: {}", e)
@@ -263,6 +290,7 @@ impl Link {
                             .execute(mysql_pool)
                             .await
                             .map_err(|e| {
+                                warn!("sync_click_counts: DB update error: {} code={}", e, code);
                                 (StatusCode::INTERNAL_SERVER_ERROR, format!("DB update error: {}", e))
                             })?;
                             
@@ -271,6 +299,7 @@ impl Link {
                                 .set(&key, 0_i64)
                                 .await
                                 .map_err(|e| {
+                                    warn!("sync_click_counts: Redis set error: {} code={}", e, code);
                                     (
                                         StatusCode::INTERNAL_SERVER_ERROR, 
                                         format!("Redis set error: {}", e)
@@ -309,6 +338,7 @@ impl Link {
                 .query_async(redis_mgr)
                 .await
                 .map_err(|e| {
+                    warn!("sync_visit_logs: Redis XRANGE error: {}", e);
                     (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis XRANGE error: {}", e))
                 })?;
 
@@ -348,16 +378,18 @@ impl Link {
                 .execute(mysql_pool)
                 .await
                 .map_err(|e| {
+                    warn!("sync_visit_logs: DB insert error: {}", e);
                     (StatusCode::INTERNAL_SERVER_ERROR, format!("DB insert error: {}", e))
                 })?;
 
                 // 4. 删除已同步的 Stream 条目，避免重复同步
                 let _: () = redis::cmd("XDEL")
                     .arg("visit_log")
-                    .arg(entry_id)
+                    .arg(&entry_id)
                     .query_async(redis_mgr)
                     .await
                     .map_err(|e| {
+                        warn!("sync_visit_logs: Redis XDEL error: {}", e);
                         (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis XDEL error: {}", e))
                     })?;
             }
@@ -398,13 +430,28 @@ impl Link {
         qb.push(" AND (expire_at IS NULL OR expire_at > NOW())");
     }
 
+    fn to_view(
+        src: LinkDto,
+        offset: FixedOffset,
+    ) -> LinkView {
+        LinkView {
+            id: src.id,
+            user_id: src.user_id,
+            short_code: src.short_code,
+            long_url: src.long_url,
+            click_count: src.click_count,
+            expire_at: src.expire_at.map(|t| t.with_timezone(&offset)),
+            created_at: src.created_at.with_timezone(&offset),
+        }
+    }
+
     /// 查询短链列表
     pub async fn find_links(
         mysql_pool: &MySqlPool,
         filter: &LinkQuery,
         limit: u64,
         offset: u64,
-    ) -> Result<(Vec<LinkDto>, i64), (StatusCode, String)> {
+    ) -> Result<(Vec<LinkView>, i64), (StatusCode, String)> {
         let mut data_qb: QueryBuilder<MySql> = QueryBuilder::new(
             "SELECT id, user_id, short_code, long_url, click_count, expire_at, created_at \
              FROM links WHERE 1 = 1 "
@@ -424,8 +471,17 @@ impl Link {
             .fetch_all(mysql_pool)
             .await
             .map_err(|e| {
+                warn!("find_links: DB select error: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("DB select error: {}", e))
             })?;
+
+        // 如果前端传了时区偏移, 将查询时间到的utc时间转换为本地时间
+        let tz_offset_min = filter.tz_offset;
+        let offset = FixedOffset::east_opt(tz_offset_min * 60).unwrap();
+        let items = rows
+            .into_iter()
+            .map(|row| Self::to_view(row, offset))
+            .collect();
 
         // 统计总数
         let mut count_qb: QueryBuilder<MySql> = QueryBuilder::new(
@@ -436,10 +492,11 @@ impl Link {
             .fetch_one(mysql_pool)
             .await
             .map_err(|e| {
+                warn!("find_links: DB select error (count): {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("DB select error: {}", e))
             })?;
         
-        Ok((rows, count))
+        Ok((items, count))
     }
 
     /// 删除短链(手动)
@@ -465,10 +522,13 @@ impl Link {
             .fetch_all(mysql_pool)
             .await
             .map_err(
-                |e| (
-                    StatusCode::INTERNAL_SERVER_ERROR, 
-                    format!("DB select error: {}", e)
-                )
+                |e| {
+                    warn!("delete_links: DB select error: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR, 
+                        format!("DB select error: {}", e)
+                    )
+                }
             )?;
 
         // 构造并执行批量 DELETE
@@ -481,10 +541,13 @@ impl Link {
         qb.build().execute(mysql_pool)
             .await
             .map_err(
-                |e| (
-                    StatusCode::INTERNAL_SERVER_ERROR, 
-                    format!("DB Delete error: {}", e)
-                )
+                |e| {
+                    warn!("delete_links: DB Delete error: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR, 
+                        format!("DB Delete error: {}", e)
+                    )
+                }
             )?;
 
         // 构造并执行批量 UNLINK
@@ -497,7 +560,10 @@ impl Link {
             }
             let _: () = pipe.query_async(redis_mgr)
                 .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis unlink error: {}", e)))?;
+                .map_err(|e| {
+                    warn!("delete_links: Redis unlink error: {}", e);
+                    (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis unlink error: {}", e))
+                })?;
         }
 
         Ok(())
@@ -514,10 +580,13 @@ impl Link {
         qb.build().execute(mysql_pool)
             .await
             .map_err(
-                |e| (
-                    StatusCode::INTERNAL_SERVER_ERROR, 
-                    format!("DB Delete error: {}", e)
-                )
+                |e| {
+                    warn!("delete_expired_links: DB Delete error: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR, 
+                        format!("DB Delete error: {}", e)
+                    )
+                }
             )?;
 
         Ok(())
@@ -528,6 +597,7 @@ impl Link {
     pub async fn count_daily_visits_by_code(
         mysql_pool: &MySqlPool,
         short_code: &str,
+        offset: i32,
         user_id: u64,
         days: u8,
     ) -> Result<Vec<(String, i64)>, (StatusCode, String)> {
@@ -540,15 +610,19 @@ impl Link {
         .fetch_optional(mysql_pool)
         .await
         .map_err(
-            |e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB select error: {}", e))
+            |e| {
+                warn!("count_daily_visits_by_code: DB select error: {} short_code={} user_id={}", e, short_code, user_id);
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("DB select error: {}", e))
+            }
         )?;
 
         if row.is_none() {
+            warn!("count_daily_visits_by_code: 短码不存在: short_code={} user_id={}", short_code, user_id);
             return Err((StatusCode::NOT_FOUND, "Short code not found".into()));
         }
 
 
-        // 计算查询起始日期：今天减 (days - 1)
+        // 计算查询起始日期
         let start_date = Utc::now()
             .date_naive()
             .checked_sub_days(chrono::Days::new(days as u64))
@@ -568,7 +642,10 @@ impl Link {
         )
         .fetch_all(mysql_pool)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB select error: {}", e)))?;
+        .map_err(|e| {
+            warn!("count_daily_visits_by_code: DB select error (visit_logs): {} short_code={}", e, short_code);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("DB select error: {}", e))
+        })?;
 
         // 把查询结果先放进 HashMap，以便补齐缺失日期
         let mut day_map: HashMap<chrono::NaiveDate, i64> = HashMap::new();
@@ -578,12 +655,18 @@ impl Link {
             }
         }
 
-        // 组装连续 days 天的数据，缺失的日期补 0
+        // 组装连续 days 天的数据，缺失的日期补 0, 并进行时区转换
+        let fixed = FixedOffset::east_opt(offset * 60).unwrap();
         let mut result = Vec::with_capacity(days as usize);
         for i in 0..days {
-            let d = start_date + chrono::Days::new(i as u64);
-            let cnt = day_map.get(&d).copied().unwrap_or(0);
-            result.push((d.to_string(), cnt));
+            let utc_day = start_date + chrono::Days::new(i as u64);
+            // utc 日零点 -> 加偏移 -> 本地时间
+            let local_day = fixed
+                .from_utc_datetime(&utc_day.and_hms_opt(0, 0, 0).unwrap())
+                .date_naive();
+            
+            let cnt = day_map.get(&utc_day).copied().unwrap_or(0);
+            result.push((local_day.to_string(), cnt));
         }
 
         Ok(result)

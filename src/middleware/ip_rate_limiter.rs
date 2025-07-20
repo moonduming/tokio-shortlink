@@ -5,6 +5,7 @@ use axum::{
     middleware::Next, 
     response::Response
 };
+use tracing::warn;
 use std::{sync::Arc, net::SocketAddr};
 use crate::state::AppState;
 use rand::{rng, seq::IndexedRandom};
@@ -27,15 +28,20 @@ pub async fn ip_rate_limiter(
     // - 限流维度多样化，如 IP + Path，或账号 + 失败计数。
     let key = format!("rate_limit:ip:{}", ip);
     // 从配置中读取限流参数
-    let config = state.config.read().await;
-    let limit = config.ip_rate_limit;
-    let window_secs = config.ip_rate_limit_window;
+    let (limit, window_secs) = {
+        let config = state.config.read().await;
+        (config.ip_rate_limit, config.ip_rate_limit_window)
+    };
+    
     // redis 提前释放
     {
         // 获取redis连接
         let manager = state.managers
             .choose(&mut rng())
-            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into()))?;
+            .ok_or({
+                warn!("ip_rate_limiter: 没有可用 Redis 连接池, ip={}", ip);
+                (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
+            })?;
         let mut conn = manager.lock().await;
 
         // 限流逻辑
@@ -43,6 +49,7 @@ pub async fn ip_rate_limiter(
             .incr(&key, 1)
             .await
             .map_err(|e| {
+                warn!("ip_rate_limiter: Redis Incr 失败, ip={}, err={}", ip, e);
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis Incr err: {}", e))
             })?;
 
@@ -51,11 +58,13 @@ pub async fn ip_rate_limiter(
             let _: () = conn.expire(&key, window_secs)
                 .await
                 .map_err(|e| {
+                    warn!("ip_rate_limiter: Redis Expire 失败, ip={}, err={}", ip, e);
                     (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis Expire err: {}", e))
                 })?;
         }
         
         if count > limit {
+            warn!("ip_rate_limiter: 访问超限, ip={}, limit={}, window={}", ip, limit, window_secs);
             // 超出限制
             return Err((StatusCode::TOO_MANY_REQUESTS, "Too many requests".into()));
         }
