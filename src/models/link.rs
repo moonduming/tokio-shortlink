@@ -2,15 +2,18 @@ use tracing::warn;
 use redis::{aio::ConnectionManager, AsyncCommands};
 use std::collections::HashMap;
 use sqlx::{
-    mysql::{MySql, MySqlQueryResult, MySqlDatabaseError}, 
-    prelude::FromRow, 
-    MySqlPool, 
-    QueryBuilder, 
-    Transaction
+    mysql::{MySql, MySqlDatabaseError, MySqlQueryResult}, prelude::FromRow, MySqlPool, QueryBuilder, Transaction
 };
 use axum::http::StatusCode;
-use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
-use serde::Serialize;
+use chrono::{
+    DateTime,
+    NaiveDateTime,
+    Utc,
+    Duration,
+    TimeZone,
+};
+use chrono_tz::Tz;
+use serde::{Serialize, Deserialize};
 
 use crate::handlers::shortlink::LinkQuery;
 
@@ -26,28 +29,28 @@ struct VisitLog {
 }
 
 
-#[derive(FromRow, Debug, Serialize)]
+#[derive(FromRow, Debug, Serialize, Deserialize)]
 pub struct LinkDto {
     pub id: u64,
     pub user_id: u64,
     pub short_code: String,
     pub long_url: String,
     pub click_count: u64,
-    pub expire_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
+    pub expire_at: Option<NaiveDateTime>,
+    pub created_at: NaiveDateTime,
 }
 
 
 /// 只在返回 JSON 时使用
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct LinkView {
     pub id: u64,
     pub user_id: u64,
     pub short_code: String,
     pub long_url: String,
     pub click_count: u64,
-    pub expire_at: Option<DateTime<FixedOffset>>,
-    pub created_at: DateTime<FixedOffset>,
+    pub expire_at: Option<String>,
+    pub created_at: String,
 }
 
 
@@ -430,18 +433,17 @@ impl Link {
         qb.push(" AND (expire_at IS NULL OR expire_at > NOW())");
     }
 
-    fn to_view(
-        src: LinkDto,
-        offset: FixedOffset,
-    ) -> LinkView {
+    /// 构建返回数据
+    fn to_view(src: LinkDto) -> LinkView {
+        let fmt = "%Y-%m-%d %H:%M:%S";
         LinkView {
             id: src.id,
             user_id: src.user_id,
             short_code: src.short_code,
             long_url: src.long_url,
             click_count: src.click_count,
-            expire_at: src.expire_at.map(|t| t.with_timezone(&offset)),
-            created_at: src.created_at.with_timezone(&offset),
+            expire_at: src.expire_at.map(|t| t.format(fmt).to_string()),
+            created_at: src.created_at.format(fmt).to_string(),
         }
     }
 
@@ -452,10 +454,17 @@ impl Link {
         limit: u64,
         offset: u64,
     ) -> Result<(Vec<LinkView>, i64), (StatusCode, String)> {
+
         let mut data_qb: QueryBuilder<MySql> = QueryBuilder::new(
-            "SELECT id, user_id, short_code, long_url, click_count, expire_at, created_at \
-             FROM links WHERE 1 = 1 "
+            "SELECT id, user_id, short_code, long_url, click_count, "
         );
+        data_qb
+            .push("CONVERT_TZ(expire_at, 'UTC', ")
+            .push_bind(&filter.timezone)
+            .push(") AS expire_at, ")
+            .push("CONVERT_TZ(created_at, 'UTC', ")
+            .push_bind(&filter.timezone)
+            .push(") AS created_at FROM links WHERE 1 = 1 ");
 
         // 添加筛选条件
         Self::apply_filters(&mut data_qb, filter);
@@ -475,12 +484,9 @@ impl Link {
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("DB select error: {}", e))
             })?;
 
-        // 如果前端传了时区偏移, 将查询时间到的utc时间转换为本地时间
-        let tz_offset_min = filter.tz_offset;
-        let offset = FixedOffset::east_opt(tz_offset_min * 60).unwrap();
         let items = rows
             .into_iter()
-            .map(|row| Self::to_view(row, offset))
+            .map(Self::to_view)
             .collect();
 
         // 统计总数
@@ -495,13 +501,13 @@ impl Link {
                 warn!("find_links: DB select error (count): {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("DB select error: {}", e))
             })?;
-        
+
         Ok((items, count))
     }
 
     /// 删除短链(手动)
     pub async fn delete_links(
-        mysql_pool: &MySqlPool,
+        tx: &mut Transaction<'_, MySql>,
         redis_mgr: &mut ConnectionManager,
         link_ids: &[u64],
         user_id: u64,
@@ -519,7 +525,7 @@ impl Link {
         code_qb.push(")");
         let short_codes: Vec<(String,)> = code_qb
             .build_query_as()
-            .fetch_all(mysql_pool)
+            .fetch_all(tx.as_mut())
             .await
             .map_err(
                 |e| {
@@ -531,27 +537,48 @@ impl Link {
                 }
             )?;
 
-        // 构造并执行批量 DELETE
-        let mut qb = QueryBuilder::new("DELETE FROM links WHERE id IN ( ");
-        let mut separated = qb.separated(", ");
-        for link_id in link_ids {
-            separated.push_bind(link_id);
-        }
-        qb.push(") AND user_id = ").push_bind(user_id);
-        qb.build().execute(mysql_pool)
-            .await
-            .map_err(
-                |e| {
-                    warn!("delete_links: DB Delete error: {}", e);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR, 
-                        format!("DB Delete error: {}", e)
-                    )
-                }
-            )?;
-
-        // 构造并执行批量 UNLINK
         if !short_codes.is_empty() {
+            // todo: 是否直接物理删除？visit_log 表中的记录是否需要保留(保留短链不会被回收)？
+            // 暂时先直接删除
+            // 构造并执行批量 DELETE
+            let mut qb = QueryBuilder::new("DELETE FROM links WHERE id IN ( ");
+            let mut separated = qb.separated(", ");
+            for link_id in link_ids {
+                separated.push_bind(link_id);
+            }
+            qb.push(") AND user_id = ").push_bind(user_id);
+            qb.build().execute(tx.as_mut())
+                .await
+                .map_err(
+                    |e| {
+                        warn!("delete_links: DB Delete error: {}", e);
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR, 
+                            format!("DB Delete error: {}", e)
+                        )
+                    }
+                )?;
+            
+            // 将visit_log表中对应的短链删除
+            let mut qb = QueryBuilder::new("DELETE FROM visit_logs WHERE short_code IN ( ");
+            let mut separated = qb.separated(", ");
+            for (short_code,) in &short_codes {
+                separated.push_bind(short_code);
+            }
+            qb.push(")");
+            qb.build().execute(tx.as_mut())
+                .await
+                .map_err(
+                    |e| {
+                        warn!("delete_links: DB Delete error: {}", e);
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR, 
+                            format!("DB Delete error: {}", e)
+                        )
+                    }
+                )?;
+
+            // 构造并执行批量 UNLINK
             let mut pipe = redis::pipe();
             pipe.atomic();
             for (code,) in &short_codes {
@@ -597,11 +624,11 @@ impl Link {
     pub async fn count_daily_visits_by_code(
         mysql_pool: &MySqlPool,
         short_code: &str,
-        offset: i32,
+        timezone: String,
         user_id: u64,
         days: u8,
     ) -> Result<Vec<(String, i64)>, (StatusCode, String)> {
-        // 检查short_code是否属于user_id
+        // 校验短链归属
         let row = sqlx::query!(
             r#"SELECT id FROM links WHERE short_code = ? AND user_id = ?"#,
             short_code,
@@ -622,23 +649,44 @@ impl Link {
         }
 
 
-        // 计算查询起始日期
-        let start_date = Utc::now()
+        // 计算 UTC 查询范围
+        let tz: Tz = timezone.parse().map_err(|_| {
+            warn!("count_daily_visits_by_code: invalid timezone: {}", timezone);
+            (StatusCode::BAD_REQUEST, "Invalid timezone".to_string())
+        })?;
+        let now_utc = Utc::now();
+        let now_local = now_utc.with_timezone(&tz);
+
+        // 本地起始 00:00:00（days 天 含当天）
+        let start_local_midnight = (now_local - Duration::days(days as i64 - 1))
             .date_naive()
-            .checked_sub_days(chrono::Days::new(days as u64))
-            .unwrap_or_else(|| Utc::now().date_naive());
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let start_local_dt = tz
+            .from_local_datetime(&start_local_midnight)
+            .single()
+            .ok_or_else(|| {
+                warn!("count_daily_visits_by_code: ambiguous local datetime for start_midnight");
+                (StatusCode::INTERNAL_SERVER_ERROR, "Ambiguous local datetime".to_string())
+            })?;
+        let start_utc = start_local_dt.naive_utc();
+    
+        let today_local = now_local.date_naive();
+        let start_local_date = start_local_dt.date_naive();
 
         // 执行聚合查询
         let rows = sqlx::query!(
             r#"
-            SELECT DATE(visit_time) AS day, COUNT(*) AS cnt
+            SELECT DATE(CONVERT_TZ(visit_time, 'UTC', ?)) AS day_local, COUNT(*) AS cnt
             FROM visit_logs
-            WHERE short_code = ? AND visit_time >= ?
-            GROUP BY day
-            ORDER BY day
+            WHERE short_code = ? AND visit_time >= ? AND visit_time <= ?
+            GROUP BY day_local
+            ORDER BY day_local
             "#,
+            timezone,
             short_code,
-            start_date
+            start_utc,
+            now_utc
         )
         .fetch_all(mysql_pool)
         .await
@@ -647,26 +695,23 @@ impl Link {
             (StatusCode::INTERNAL_SERVER_ERROR, format!("DB select error: {}", e))
         })?;
 
-        // 把查询结果先放进 HashMap，以便补齐缺失日期
-        let mut day_map: HashMap<chrono::NaiveDate, i64> = HashMap::new();
+        // 把查询结果放进 HashMap，键直接用 "YYYY-MM-DD" 字符串
+        let mut day_map: HashMap<String, i64> = HashMap::new();
         for row in rows {
-            if let Some(day) = row.day {
-                day_map.insert(day, row.cnt);
+            if let Some(day) = row.day_local {
+                let key = day.format("%Y-%m-%d").to_string();
+                day_map.insert(key, row.cnt);
             }
         }
 
-        // 组装连续 days 天的数据，缺失的日期补 0, 并进行时区转换
-        let fixed = FixedOffset::east_opt(offset * 60).unwrap();
+        // 组装连续 days 天的数据，缺失的日期补 0
         let mut result = Vec::with_capacity(days as usize);
-        for i in 0..days {
-            let utc_day = start_date + chrono::Days::new(i as u64);
-            // utc 日零点 -> 加偏移 -> 本地时间
-            let local_day = fixed
-                .from_utc_datetime(&utc_day.and_hms_opt(0, 0, 0).unwrap())
-                .date_naive();
-            
-            let cnt = day_map.get(&utc_day).copied().unwrap_or(0);
-            result.push((local_day.to_string(), cnt));
+        let mut d = start_local_date;
+        while d <= today_local {
+            let key_str = d.format("%Y-%m-%d").to_string();
+            let cnt = day_map.get(&key_str).copied().unwrap_or(0);
+            result.push((key_str, cnt));
+            d = d.succ_opt().unwrap(); // 下一天
         }
 
         Ok(result)

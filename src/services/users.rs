@@ -40,9 +40,11 @@ impl UserService {
     ) -> Result<(), (StatusCode, String)> {
         let manager = state
             .managers
-            .choose(&mut rng()).ok_or(
+            .choose(&mut rng())
+            .ok_or_else(|| {
+                warn!("register: No Redis manager");
                 (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
-            )?;
+            })?;
 
         let mut conn = manager.lock().await;
         // 判断 IP 是否到达注册次数上限
@@ -97,7 +99,10 @@ impl UserService {
 
         let manager = state.managers
             .choose(&mut rng())
-            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into()))?;
+            .ok_or_else(|| {
+                warn!("login: No Redis manager");
+                (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
+            })?;
 
         let mut conn = manager.lock().await;
         

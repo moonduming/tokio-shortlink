@@ -7,11 +7,11 @@ use axum::{
 };
 use axum_extra::TypedHeader;
 use chrono::NaiveDateTime;
-use chrono::Duration;
+use chrono_tz::Tz;
 use headers::{UserAgent, Referer};
 use std::{sync::Arc, net::SocketAddr};
 use serde::{Deserialize, Serialize};
-use validator::Validate;
+use validator::{Validate, ValidationError};
 use tracing::warn;
 
 use crate::{
@@ -36,7 +36,19 @@ pub struct ShortlinkCreateResp {
     pub short_url: String,
 }
 
+/// 默认时区
+fn default_timezone() -> String {
+    "UTC".to_string()
+}
 
+
+/// 校验是否是 IANA 时区名
+fn validate_tz(timezone: &str) -> Result<(), ValidationError> {
+    if timezone.parse::<Tz>().is_err() {
+        return Err(ValidationError::new("Invalid_tz"));
+    }
+    Ok(())
+}
 
 /// 查询参数
 #[derive(Debug, Default, Deserialize, Validate)]
@@ -48,17 +60,12 @@ pub struct LinkQuery {
     pub click_count: Option<u64>, // 点击量
     pub date_from:    Option<NaiveDateTime>, // 日期范围
     pub date_to:      Option<NaiveDateTime>,
-    /// 客户端时区偏移（以分钟为单位，表示本地时间与UTC的差值）。
-    /// 例如：
-    ///   - 北京时间（UTC+8）传 480，西八区（UTC-8）传 -480，UTC 传 0。
-    ///   - 部分时区可能不是整小时，例如印度标准时间（UTC+5:30）传 330。
-    /// 该参数用于前端筛选日期范围时，将本地时间范围转换为UTC时间后进行查询。
-    /// 推荐前端通过 JS 获取方式为：-new Date().getTimezoneOffset()。
-    /// 
-    /// 如果未传此参数，后端默认按照UTC进行时间查询，可能导致跨时区用户查询不准确。
-    #[serde(default)]
-    #[validate(range(min = -1440, max = 1440, message = "Tz_offset must be between -1440 and 1440"))]
-    pub tz_offset: i32,
+    /// 客户端所在时区（使用 IANA 时区名称，如 "Asia/Shanghai"）。
+    /// 该参数用于将前端传入的本地时间范围转换为 UTC 时间进行后端查询。
+    /// 如果未传此参数，后端默认按照 UTC 查询，可能导致跨时区用户的查询结果不准确。
+    #[serde(default = "default_timezone")]
+    #[validate(custom(function = "validate_tz"))]
+    pub timezone: String,
     // ---分页---
     #[validate(range(min = 1, max = 100, message = "Limit must be between 1 and 100"))]
     #[serde(default = "default_limit")]
@@ -67,11 +74,12 @@ pub struct LinkQuery {
     pub offset: u64,
 }
 
+/// 默认每页数量
 fn default_limit() -> u64 { 10 }
 
 
 /// 返回数据
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct LinkList {
     pub links: Vec<LinkView>,
     pub count: i64,
@@ -93,11 +101,12 @@ pub struct LinkStatsQuery {
     #[serde(default = "default_days")]
     #[validate(range(min = 1, message = "Days must be greater than 0"))]
     pub days: u8, 
-    #[serde(default)]
-    #[validate(range(min = -1440, max = 1440, message = "Tz_offset must be between -1440 and 1440"))]
-    pub tz_offset: i32, // 选填：时区偏移
+    #[serde(default = "default_timezone")]
+    #[validate(custom(function = "validate_tz"))]
+    pub timezone: String, // 选填：时区偏移
 }
 
+/// 默认天数
 fn default_days() -> u8 { 30 }
 
 
@@ -179,16 +188,7 @@ pub async fn list_links(
     }
 
     q.user_id = Some(user.id);
-    // 如果前端传了时区偏移, 将本地时间转换为 UTC 再查询
-    if q.tz_offset != 0 {
-        let offset = Duration::minutes(q.tz_offset.into());
-        if let Some(df) = q.date_from {
-            q.date_from = Some(df - offset);
-        }
-        if let Some(dt) = q.date_to {
-            q.date_to = Some(dt - offset);
-        }
-    }
+    
     let (links, count) = ShortlinkService::list_links(
         &state,
         &q,
@@ -205,6 +205,11 @@ pub async fn delete_links(
     Extension(user): Extension<User>,
     Json(payload): Json<DeleteLinksReq>,
 ) -> Result<(), (StatusCode, String)> {
+    // 校验删除参数
+    if let Err(e) = payload.validate() {
+        warn!("delete_links: 删除参数校验失败: user_id={}, error={}", user.id, e);
+        return Err((StatusCode::BAD_REQUEST, format!("Validation error: {}", e)));
+    }
     ShortlinkService::delete_links(
         &state,
         payload.ids,
@@ -229,7 +234,7 @@ pub async fn get_link_stats(
         &state,
         &q.short_code,
         user.id,
-        q.tz_offset,
+        q.timezone,
         q.days,
     ).await?;
 

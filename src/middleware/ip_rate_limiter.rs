@@ -38,7 +38,7 @@ pub async fn ip_rate_limiter(
         // 获取redis连接
         let manager = state.managers
             .choose(&mut rng())
-            .ok_or({
+            .ok_or_else(|| {
                 warn!("ip_rate_limiter: 没有可用 Redis 连接池, ip={}", ip);
                 (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
             })?;

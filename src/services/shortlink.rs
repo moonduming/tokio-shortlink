@@ -104,7 +104,7 @@ impl ShortlinkService {
         // 随机选择一个 Redis 连接
         let manager = state.managers
             .choose(&mut rng())
-            .ok_or(     {
+            .ok_or_else(|| {
                 warn!("create_shortlink: No Redis manager");
                 (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
             })?;
@@ -175,7 +175,7 @@ impl ShortlinkService {
         // 随机选择一个 Redis 连接
         let manager = state.managers
             .choose(&mut rng())
-            .ok_or(     {
+            .ok_or_else(|| {
                 warn!("get_long_url: No Redis manager");
                 (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
             })?;
@@ -261,18 +261,33 @@ impl ShortlinkService {
     ) -> Result<(), (StatusCode, String)> {
         let manager = state.managers
             .choose(&mut rng())
-            .ok_or(     {
+            .ok_or_else(|| {
                 warn!("delete_links: No Redis manager");
                 (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
             })?;
 
         let mut conn = manager.lock().await;
+        // 开启 mysql 事务
+        let mut tx = state
+            .mysql_pool
+            .begin()
+            .await
+            .map_err(|e| {
+                warn!("delete_links: DB Begin error: {}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("DB Begin error: {}", e))
+            })?;
+
         Link::delete_links(
-            &state.mysql_pool,
+            &mut tx,
             &mut conn,
             &link_ids,
             user_id,
         ).await?;
+
+        tx.commit().await.map_err(|e| {
+            warn!("delete_links: DB Commit error: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("DB Commit error: {}", e))
+        })?;
 
         Ok(())
     }
@@ -282,7 +297,7 @@ impl ShortlinkService {
         state: &AppState,
         short_code: &str,
         user_id: u64,
-        tz_offset: i32,
+        timezone: String,
         days: u8,
     ) -> Result<Vec<(String, i64)>, (StatusCode, String)> {
         // 校验days 是否超过最大值
@@ -296,7 +311,7 @@ impl ShortlinkService {
         Link::count_daily_visits_by_code(
             &state.mysql_pool,
             short_code,
-            tz_offset,
+            timezone,
             user_id,
             days,
         ).await

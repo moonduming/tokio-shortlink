@@ -1,10 +1,12 @@
 //! 测试公共初始化：加载 `.env.test` 并确保测试用户存在。
 use std::env;
+use reqwest::{Client, StatusCode};
 use argon2::Argon2;
 use password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
-
 use sqlx::MySqlPool;
 use tokio::runtime::Runtime;
+use serde_json::Value;
+use tokio_shortlink::services::LoginResp;
 
 #[ctor::ctor]
 fn init() {
@@ -58,4 +60,40 @@ fn init() {
         .expect("insert link");
         });
     
+}
+
+
+#[allow(dead_code)]
+pub async fn login(
+    url: &str,
+    body: &Value,
+) -> String {
+    let client = Client::new();
+    let res = client
+        .post(url)
+        .json(&body)
+        .send()
+        .await
+        .expect("login failed");
+    assert_eq!(res.status(), StatusCode::OK);
+
+    res.json::<LoginResp>().await.unwrap().token
+}
+
+
+#[allow(dead_code)]
+pub async fn shorten(
+    url: &str,
+    body: &Value,
+    token: &str,
+){
+    let client = Client::new();
+    let res = client
+        .post(url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .expect("shorten failed");
+    assert_eq!(res.status(), StatusCode::OK);
 }

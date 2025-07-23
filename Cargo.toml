@@ -8,6 +8,7 @@ argon2 = { version = "0.5.3", features = ["password-hash", "std"] }
 axum = { version = "0.8.4", features = ["macros"] }
 axum-extra = { version = "0.10.1", features = ["typed-header"] }
 chrono = { version = "0.4.41", features = ["serde"] }
+chrono-tz = "0.10.4"
 config = "0.15.13"
 ctor = "0.4.2"
 dotenvy = "0.15.7"

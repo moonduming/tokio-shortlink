@@ -28,7 +28,7 @@ pub async fn jwt_auth(
         .get("Authorization")
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
-        .ok_or({
+        .ok_or_else(|| {
             warn!("jwt_auth: 缺少 Authorization header");
             (
                 StatusCode::UNAUTHORIZED, 
@@ -56,7 +56,7 @@ pub async fn jwt_auth(
     // 随机选择一个 Redis 连接
     let manager = state.managers
         .choose(&mut rng())
-        .ok_or({
+        .ok_or_else(|| {
             warn!("jwt_auth: 没有可用 Redis 连接池");
             (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
         })?;

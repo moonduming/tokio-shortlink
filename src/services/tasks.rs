@@ -76,13 +76,13 @@ pub async fn spawn_visit_log_sync(state: Arc<AppState>) {
 /// 过期短链删除
 pub async fn spawn_expired_links_delete(state: Arc<AppState>) {
     tokio::spawn(async move {
-        // 每 30 分钟同步一次访问日志
+        // 每 30 分钟同步一次过期短链
         let mut ticker = interval(Duration::from_secs(1800));
         loop {
             ticker.tick().await;
             info!("Syncing expired links start");
 
-            // 同步访问日志
+            // 删除过期短链
             if let Err(e) = Link::delete_expired_links(
                 &state.mysql_pool, 
             ).await {
