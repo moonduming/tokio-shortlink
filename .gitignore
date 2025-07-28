@@ -2,3 +2,5 @@
 .env
 .env.test
 notes.md
+.env.docker
+.sqlx

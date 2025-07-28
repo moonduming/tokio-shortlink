@@ -1,0 +1,23 @@
+# Rust 编译产物
+/target
+
+# 环境变量文件（保留 example）
+.env
+.env.*
+!.env.example
+
+# IDE/编辑器
+.vscode
+.idea
+
+# 版本管理
+.git
+.gitignore
+
+# 日志、备份与文档
+*.log
+*.md
+*.rs.bk
+
+# 测试代码
+tests/

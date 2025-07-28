@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use config::{Config, Environment, ConfigError};
-use dotenvy;
-use std::env;
+// use dotenvy;
+// use std::env;
 
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
@@ -52,8 +52,8 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         // 根据 ENV_FILE 环境变量指定的文件加载环境变量，默认使用 ".env"
-        let env_file = env::var("ENV_FILE").unwrap_or_else(|_| ".env".to_string());
-        dotenvy::from_filename(&env_file).ok();
+        // let env_file = env::var("ENV_FILE").unwrap_or_else(|_| ".env".to_string());
+        // dotenvy::from_filename(&env_file).ok();
         Config::builder()
             .add_source(Environment::default())
             .build()?

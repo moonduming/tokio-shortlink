@@ -18,7 +18,7 @@ pub async fn ip_rate_limiter(
     req: Request<Body>,
     next: Next,
 ) -> Result<Response, (StatusCode, String)> {
-    let ip = addr.ip().to_string();
+    let ip: String = addr.ip().to_string();
     // TODO: 当前限流策略仅基于 IP 地址，存在以下缺陷：
     // - 多用户共用同一个公网 IP（如校园网、公司网络、NAT 4G）时，某用户恶意请求将导致其他正常用户被误伤。
     // - 攻击者可使用代理/轮换 IP 绕过限流。
