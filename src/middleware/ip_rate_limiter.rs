@@ -8,7 +8,6 @@ use axum::{
 use tracing::warn;
 use std::{sync::Arc, net::SocketAddr};
 use crate::state::AppState;
-use rand::{rng, seq::IndexedRandom};
 use redis::AsyncCommands;
 
 
@@ -36,13 +35,10 @@ pub async fn ip_rate_limiter(
     // redis 提前释放
     {
         // 获取redis连接
-        let manager = state.managers
-            .choose(&mut rng())
-            .ok_or_else(|| {
-                warn!("ip_rate_limiter: 没有可用 Redis 连接池, ip={}", ip);
-                (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
-            })?;
-        let mut conn = manager.lock().await;
+        let mut conn = state.redis_pool.get().await.map_err(|e| {
+            warn!("ip_rate_limiter: Redis 获取连接失败: err={}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis err: {}", e))
+        })?;
 
         // 限流逻辑
         let count: i64 = conn

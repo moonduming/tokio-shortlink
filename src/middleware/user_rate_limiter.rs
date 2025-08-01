@@ -11,7 +11,6 @@ use crate::{
     state::AppState, 
     models::user::User
 };
-use rand::{rng, seq::IndexedRandom};
 use redis::AsyncCommands;
 
 
@@ -31,14 +30,10 @@ pub async fn user_rate_limiter(
     // redis 提前释放
     {
         // 获取redis连接
-        let manager = state.managers
-            .choose(&mut rng())
-            .ok_or_else(|| {
-                warn!("user_rate_limiter: 没有可用 Redis 连接池, user_id={}", user.id);
-                (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
-            })?;
-
-        let mut conn = manager.lock().await;
+        let mut conn = state.redis_pool.get().await.map_err(|e| {
+            warn!("user_rate_limiter: Redis 获取连接失败: err={}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis err: {}", e))
+        })?;
         // 限流逻辑
         let count: i64 = conn
             .incr(&key, 1)

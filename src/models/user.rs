@@ -1,7 +1,8 @@
 use serde::{Serialize, Deserialize};
 use sqlx::MySqlPool;
 use axum::http::StatusCode;
-use redis::{aio::ConnectionManager, AsyncCommands};
+use redis::AsyncCommands;
+use deadpool_redis::Connection;
 use tracing::warn;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -106,7 +107,7 @@ impl User {
 
     /// 读取次数
     async fn read_count(
-        redis_mgr: &mut ConnectionManager,
+        redis_mgr: &mut Connection,
         key: &str,
     ) -> Result<i64, (StatusCode, String)> {
         let cnt = redis_mgr.get::<_,Option<i64>>(key).await.map_err(|e| {
@@ -119,7 +120,7 @@ impl User {
 
     /// 检查次数是否超过限制
     async fn check_limit(
-        redis_mgr: &mut ConnectionManager,
+        redis_mgr: &mut Connection,
         key: &str,
         limit: i64,
     ) -> Result<bool, (StatusCode, String)> {
@@ -128,7 +129,7 @@ impl User {
     }
 
     async fn incr_count(
-        redis_mgr: &mut ConnectionManager,
+        redis_mgr: &mut Connection,
         key: &str,
         ttl: i64,
     ) -> Result<(), (StatusCode, String)> {
@@ -155,7 +156,7 @@ impl User {
 
     /// 判断用户是否可以登录
     pub async fn can_login(
-        redis_mgr: &mut ConnectionManager,
+        redis_mgr: &mut Connection,
         user_login_fail_limit: i64,
         ip_user_login_fail_limit: i64,
         user_fail_key: &str,
@@ -191,7 +192,7 @@ impl User {
 
     /// 记录登录失败
     pub async fn record_login_fail(
-        redis_mgr: &mut ConnectionManager,
+        redis_mgr: &mut Connection,
         user_fail_key: &str,
         ip_user_fail_key: &str,
         user_login_fail_ttl: i64,
@@ -214,7 +215,7 @@ impl User {
 
     /// 登录成功
     pub async fn login_success(
-        redis_mgr: &mut ConnectionManager,
+        redis_mgr: &mut Connection,
         user_fail_key: &str,
         ip_user_fail_key: &str,
     ) -> Result<(), (StatusCode, String)> {
@@ -237,7 +238,7 @@ impl User {
 
     /// 检查当前 IP 是否超过注册次数限制
     pub async fn can_register(
-        redis_mgr: &mut ConnectionManager,
+        redis_mgr: &mut Connection,
         ip_register_limit: i64,
         ip_register_key: &str,
     ) -> Result<(), (StatusCode, String)> {
@@ -253,7 +254,7 @@ impl User {
 
     /// 记录注册次数
     pub async fn record_register(
-        redis_mgr: &mut ConnectionManager,
+        redis_mgr: &mut Connection,
         ip_register_key: &str,
         ip_register_ttl: i64,
     ) -> Result<(), (StatusCode, String)> {

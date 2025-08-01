@@ -12,7 +12,6 @@ use crate::{
     models::user::User, 
     services::Claims
 };
-use rand::{rng, seq::IndexedRandom};
 use redis::AsyncCommands;
 use tracing::warn;
 
@@ -53,17 +52,13 @@ pub async fn jwt_auth(
     })?;
 
     let key = format!("session:{}", claims.claims.jti);
-    // 随机选择一个 Redis 连接
-    let manager = state.managers
-        .choose(&mut rng())
-        .ok_or_else(|| {
-            warn!("jwt_auth: 没有可用 Redis 连接池");
-            (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
-        })?;
 
     // 构建作用域，让 conn 在作用域结束时自动释放
     {
-        let mut conn = manager.lock().await;
+        let mut conn = state.redis_pool.get().await.map_err(|e| {
+            warn!("jwt_auth: Redis 获取连接失败: err={}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis err: {}", e))
+        })?;
 
         let exists: bool = conn.exists(&key).await.map_err(|e| {
             warn!("jwt_auth: Redis 查询失败: key={}, err={}", key, e);

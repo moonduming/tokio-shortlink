@@ -2,7 +2,6 @@ use axum::http::StatusCode;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
 use jsonwebtoken::{encode, EncodingKey, Header};
-use rand::{rng, seq::IndexedRandom};
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 use tracing::warn;
@@ -38,15 +37,10 @@ impl UserService {
         email: &str,
         ip: &str,
     ) -> Result<(), (StatusCode, String)> {
-        let manager = state
-            .managers
-            .choose(&mut rng())
-            .ok_or_else(|| {
-                warn!("register: No Redis manager");
-                (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
-            })?;
-
-        let mut conn = manager.lock().await;
+        let mut conn = state.redis_pool.get().await.map_err(|e| {
+            warn!("delete_links: Redis 获取连接失败: err={}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis err: {}", e))
+        })?;
         // 判断 IP 是否到达注册次数上限
         let config = state.config.read().await;
         let ip_register_key = format!("register:ip:{}", ip);
@@ -97,14 +91,10 @@ impl UserService {
             },
         };
 
-        let manager = state.managers
-            .choose(&mut rng())
-            .ok_or_else(|| {
-                warn!("login: No Redis manager");
-                (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
-            })?;
-
-        let mut conn = manager.lock().await;
+        let mut conn = state.redis_pool.get().await.map_err(|e| {
+            warn!("login: Redis 获取连接失败: err={}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis err: {}", e))
+        })?;
         
         let config = state.config.read().await;
 

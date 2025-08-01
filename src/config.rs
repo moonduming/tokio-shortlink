@@ -1,11 +1,11 @@
 use serde::Deserialize;
 use config::{Config, Environment, ConfigError};
-// use dotenvy;
-// use std::env;
+use dotenvy;
+use std::env;
 
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
-    /// 数据库连接字符串
+    /// MySQL 连接字符串
     pub database_url: String,
     /// Redis 连接字符串
     pub redis_url: String,
@@ -47,13 +47,42 @@ pub struct AppConfig {
     pub user_token_limit: u8,
     /// 用户限流时间窗口（秒）
     pub user_rate_limit_window: i64,
+    /// 全局 HTTP 超时时间（毫秒）
+    pub global_timeout_ms: u64,
+    /// 最大 MySQL 连接数
+    pub mysql_max_connections: u32,
+    /// 等待连接池中空闲连接的超时时间（毫秒）
+    pub mysql_acquire_timeout_ms: u64,
+    /// 单个查询语句的最大执行时间（毫秒）
+    pub mysql_query_timeout_ms: u64,
+    /// InnoDB 表中等待锁的最大时间（秒）
+    pub mysql_lock_wait_timeout_s: u64,
+
+    /// Redis 连接池最大连接数
+    pub redis_pool_size: usize,
+    /// 等待空闲连接的最大时间（毫秒）
+    pub redis_timeout_wait_ms: u64,
+    /// 新建连接的最大时间（毫秒）
+    pub redis_timeout_create_ms: u64,
+    /// 取连接前健康检查的超时时间（毫秒）
+    pub redis_timeout_recycle_ms: u64,
+    /// Redis 背台作业队列容量
+    pub bg_redis_queue_cap: usize,
+    /// Redis 背台作业最大并发数
+    pub bg_redis_max_concurrency: usize,
+    /// 过期短链删除任务的执行间隔（秒）
+    pub bg_expired_links_sync_interval: u64,
+    /// 点击量同步任务的执行间隔（秒）
+    pub bg_click_counts_sync_interval: u64,
+    /// 访问日志同步任务的执行间隔（秒）
+    pub bg_visit_logs_sync_interval: u64,
 }
 
 impl AppConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         // 根据 ENV_FILE 环境变量指定的文件加载环境变量，默认使用 ".env"
-        // let env_file = env::var("ENV_FILE").unwrap_or_else(|_| ".env".to_string());
-        // dotenvy::from_filename(&env_file).ok();
+        let env_file = env::var("ENV_FILE").unwrap_or_else(|_| ".env".to_string());
+        dotenvy::from_filename(&env_file).ok();
         Config::builder()
             .add_source(Environment::default())
             .build()?
@@ -93,6 +122,15 @@ mod tests {
             env::set_var("IP_REGISTER_TTL", "86400");
             env::set_var("USER_RATE_LIMIT", "200");
             env::set_var("USER_RATE_LIMIT_WINDOW", "60");
+            env::set_var("GLOBAL_TIMEOUT_MS", "2000");
+            env::set_var("MYSQL_MAX_CONNECTIONS", "5");
+            env::set_var("MYSQL_ACQUIRE_TIMEOUT_MS", "600");
+            env::set_var("MYSQL_QUERY_TIMEOUT_MS", "800");
+            env::set_var("MYSQL_LOCK_WAIT_TIMEOUT_S", "5");
+            env::set_var("REDIS_POOL_SIZE", "4");
+            env::set_var("REDIS_TIMEOUT_WAIT_MS", "300");
+            env::set_var("REDIS_TIMEOUT_CREATE_MS", "500");
+            env::set_var("REDIS_TIMEOUT_RECYCLE_MS", "200");
         }
 
         let cfg = AppConfig::from_env().expect("load config");
@@ -106,5 +144,6 @@ mod tests {
         assert_eq!(cfg.user_rate_limit_window, 60);
         assert_eq!(cfg.ip_register_limit, 5);
         assert_eq!(cfg.user_rate_limit, 200);
+        assert_eq!(cfg.global_timeout_ms, 2000);
     }
 }

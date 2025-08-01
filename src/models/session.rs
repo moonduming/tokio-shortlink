@@ -1,5 +1,5 @@
 use redis::Script;
-use redis::aio::ConnectionManager;
+use deadpool_redis::Connection;
 use axum::http::StatusCode;
 use tracing::warn;
 
@@ -9,7 +9,7 @@ pub async fn create_session(
     user_id: u64,
     expire_secs: i64,
     jti: &str,
-    redis_mgr: &mut ConnectionManager,
+    redis_mgr: &mut Connection,
 ) -> Result<(), (StatusCode, String)> {
     // Redis key 名称
     let jti_key = format!("session:{}", jti);

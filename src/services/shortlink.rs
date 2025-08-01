@@ -1,12 +1,12 @@
 use tracing::warn;
-use rand::{rng, seq::IndexedRandom};
 use axum::http::StatusCode;
-use redis::aio::ConnectionManager;
+use deadpool_redis::Connection;
 use crate::{
     handlers::shortlink::LinkQuery, 
     models::link::{Link, LinkView}, 
     state::AppState
 };
+use crate::services::background_jobs::BackgroundJob;
 
 
 pub struct ShortlinkService;
@@ -100,16 +100,6 @@ impl ShortlinkService {
             warn!("create_shortlink: DB Commit error: {}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, format!("DB Commit error: {}", e))
         })?;
-
-        // 随机选择一个 Redis 连接
-        let manager = state.managers
-            .choose(&mut rng())
-            .ok_or_else(|| {
-                warn!("create_shortlink: No Redis manager");
-                (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
-            })?;
-
-        let mut conn = manager.lock().await;
     
         // 判断过期时间是否大于设置的redis最大存储时间
         // 大于则设置为最大存储时间
@@ -121,47 +111,42 @@ impl ShortlinkService {
             ttl
         };
 
-        // 将短码和长 URL 存储到 Redis
-        Link::set_shortlink(
-            &mut conn,
-            &short_code,
-            long_url,
-            cache_ttl,
-        ).await?;
+        let short_code2 = short_code.clone();
+        let long_url2 = long_url.to_string();
 
-        // 设置点击量
-        Link::set_click_count(
-            &mut conn,
-            &short_code,
-            ttl,
-        ).await?;
-    
+        // 设置点击量和缓存
+        state.bg_redis_tx.try_send(BackgroundJob::SetClickCount {
+            short_code: short_code2,
+            long_url: long_url2,
+            cache_ttl,
+        }).expect("create_shortlink: bg_redis_tx try_send failed");
+
         let base = config.addr.clone();
-        Ok(format!("{}/{}", base.trim_end_matches('/'), short_code))
+        Ok(format!("{}/s/{}", base.trim_end_matches('/'), short_code))
     }
 
     /// 增加点击数和访问日志
-    async fn push_click_and_log(
-        redis_mgr: &mut ConnectionManager,
-        short_code: &str,
-        long_url: &str,
-        ip: &str,
-        user_agent: &str,
-        referer: &str,
+    pub async fn push_click_and_log(
+        conn: &mut Connection,
+        short_code: String,
+        long_url: String,
+        ip: String,
+        user_agent: String,
+        referer: String,
     ) {
-        Link::log_visit_to_stream(
-            redis_mgr,
-            short_code,
-            long_url,
-            ip,
-            user_agent,
-            referer,
-        ).await;
-        
-        Link::in_click_count(
-            redis_mgr,
-            short_code,
-        ).await;
+            Link::log_visit_to_stream(
+                conn,
+                &short_code,
+                &long_url,
+                &ip,
+                &user_agent,
+                &referer,
+            ).await;
+
+            Link::in_click_count(
+                conn,
+                &short_code,
+            ).await;
     }
 
     /// 获取长链
@@ -173,28 +158,25 @@ impl ShortlinkService {
         short_code: &str,
     ) -> Result<String, (StatusCode, String)> {
         // 随机选择一个 Redis 连接
-        let manager = state.managers
-            .choose(&mut rng())
-            .ok_or_else(|| {
-                warn!("get_long_url: No Redis manager");
-                (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
-            })?;
-
-        let mut conn = manager.lock().await;
+        let mut conn = state.redis_pool.get().await.map_err(|e| {
+            warn!("get_long_url: Redis 获取连接失败: err={}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis err: {}", e))
+        })?;
         
         // redis 命中
         if let Some(long_url) = Link::get_long_url_from_redis(
             &mut conn, 
             short_code
         ).await? {
-            Self::push_click_and_log(
-                &mut conn,
-                short_code,
-                &long_url,
-                ip,
-                user_agent,
-                referer,
-            ).await;
+             // 异步推送点击量和访问日志
+            state.bg_redis_tx.try_send(BackgroundJob::PushClickAndLog {
+                short_code: short_code.to_string(),
+                long_url: long_url.clone(),
+                ip: ip.to_string(),
+                user_agent: user_agent.to_string(),
+                referer: referer.to_string(),
+            }).expect("get_long_url: bg_redis_tx try_send failed");
+
             return Ok(long_url)
         }
 
@@ -224,15 +206,15 @@ impl ShortlinkService {
                 ).await?;
             }
         }
-        
-        Self::push_click_and_log(
-            &mut conn,
-            short_code,
-            &long_url,
-            ip,
-            user_agent,
-            referer,
-        ).await;
+
+        // 异步推送点击量和访问日志
+        state.bg_redis_tx.try_send(BackgroundJob::PushClickAndLog {
+            short_code: short_code.to_string(),
+            long_url: long_url.clone(),
+            ip: ip.to_string(),
+            user_agent: user_agent.to_string(),
+            referer: referer.to_string(),
+        }).expect("get_long_url: bg_redis_tx try_send failed");
 
         Ok(long_url)
     }
@@ -259,14 +241,10 @@ impl ShortlinkService {
         link_ids: Vec<u64>,
         user_id: u64,
     ) -> Result<(), (StatusCode, String)> {
-        let manager = state.managers
-            .choose(&mut rng())
-            .ok_or_else(|| {
-                warn!("delete_links: No Redis manager");
-                (StatusCode::INTERNAL_SERVER_ERROR, "No Redis manager".into())
-            })?;
-
-        let mut conn = manager.lock().await;
+        let mut conn = state.redis_pool.get().await.map_err(|e| {
+            warn!("delete_links: Redis 获取连接失败: err={}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Redis err: {}", e))
+        })?;
         // 开启 mysql 事务
         let mut tx = state
             .mysql_pool

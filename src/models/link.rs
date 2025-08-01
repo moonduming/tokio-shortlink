@@ -1,9 +1,10 @@
 use tracing::warn;
-use redis::{aio::ConnectionManager, AsyncCommands};
+use redis::AsyncCommands;
 use std::collections::HashMap;
 use sqlx::{
     mysql::{MySql, MySqlDatabaseError, MySqlQueryResult}, prelude::FromRow, MySqlPool, QueryBuilder, Transaction
 };
+use deadpool_redis::Connection;
 use axum::http::StatusCode;
 use chrono::{
     DateTime,
@@ -113,7 +114,7 @@ impl Link {
 
     /// 设置短码
     pub async fn set_shortlink(
-        redis_mgr: &mut ConnectionManager,
+        redis_mgr: &mut Connection,
         short_code: &str,
         long_url: &str,
         ttl: i64,
@@ -132,7 +133,7 @@ impl Link {
 
     /// 设置短码点击量
     pub async fn set_click_count(
-        redis_mgr: &mut ConnectionManager,
+        redis_mgr: &mut Connection,
         short_code: &str,
         click_ttl: i64,
     ) -> Result<(), (StatusCode, String)> {
@@ -155,7 +156,7 @@ impl Link {
 
     /// 点击次数+1
     pub async fn in_click_count(
-        redis_mgr: &mut ConnectionManager,
+        redis_mgr: &mut Connection,
         short_code: &str,
     ) {
         let key = format!("shortlink_click:{}", short_code);
@@ -164,13 +165,13 @@ impl Link {
             .await;
             
         if let Err(e) = result {
-            warn!("Redis INCR error: {}", e);
+            warn!("Redis INCR error: {} key={}", e, key);
         }
     }
 
     /// 记录访问
     pub async fn log_visit_to_stream(
-        redis_mgr: &mut ConnectionManager,
+        redis_mgr: &mut Connection,
         short_code: &str,
         long_url: &str,
         ip: &str,
@@ -199,7 +200,7 @@ impl Link {
 
     /// 从 Redis 获取长 URL
     pub async fn get_long_url_from_redis(
-        redis_mgr: &mut ConnectionManager,
+        redis_mgr: &mut Connection,
         short_code: &str,
     ) -> Result<Option<String>, (StatusCode, String)> {
 
@@ -246,7 +247,7 @@ impl Link {
     /// 同步点击量
     pub async fn sync_click_counts(
         mysql_pool: &MySqlPool,
-        redis_mgr: &mut ConnectionManager,
+        redis_mgr: &mut Connection,
         batch: usize,
     ) -> Result<(), (StatusCode, String)> {
         let mut cursor: u64 = 0;
@@ -326,7 +327,7 @@ impl Link {
     /// 同步访问日志
     pub async fn sync_visit_logs(
         mysql_pool: &MySqlPool,
-        redis_mgr: &mut ConnectionManager,
+        redis_mgr: &mut Connection,
         batch: usize,
     ) -> Result<(), (StatusCode, String)> {
         loop {
@@ -508,7 +509,7 @@ impl Link {
     /// 删除短链(手动)
     pub async fn delete_links(
         tx: &mut Transaction<'_, MySql>,
-        redis_mgr: &mut ConnectionManager,
+        redis_mgr: &mut Connection,
         link_ids: &[u64],
         user_id: u64,
     ) -> Result<(), (StatusCode, String)> {
