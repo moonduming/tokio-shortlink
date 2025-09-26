@@ -36,6 +36,7 @@ impl ShortlinkService {
         ttl: i64,
         user_id: u64
     ) -> Result<String, (StatusCode, String)> {
+        // todo 是否需要做幂等校验？
         let expire_at = chrono::Utc::now() + chrono::Duration::seconds(ttl);
         // 开启事务
         let mut tx = state
@@ -88,7 +89,7 @@ impl ShortlinkService {
             }
 
             if short_code.is_empty() {
-                warn!("create_shortlink: 100 次自动生成短码均碰撞，无法生成唯一短码，user_id={}", user_id);
+                warn!("create_shortlink: 100 次自动生成短码均碰撞, 无法生成唯一短码");
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Unable to generate unique short code".into(),

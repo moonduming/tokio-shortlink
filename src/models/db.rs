@@ -38,14 +38,14 @@ pub async fn new_mysql_pool(
 pub fn new_redis_pool(
     redis_url: &str,
     max_connections: usize,
-    t_awit: u64,
+    t_wait: u64,
     t_create: u64,
     t_recycle: u64,
 ) -> Result<Pool, deadpool_redis::CreatePoolError> {
     let mut cfg = Config::from_url(redis_url);
     // 配置连接池超时：等待空闲连接 300ms，新建连接超时 500ms
     let mut pool_cfg = PoolConfig::new(max_connections);
-    pool_cfg.timeouts.wait = Some(Duration::from_millis(t_awit));  // 等待空闲连接 300ms
+    pool_cfg.timeouts.wait = Some(Duration::from_millis(t_wait));  // 等待空闲连接 300ms
     pool_cfg.timeouts.create = Some(Duration::from_millis(t_create));  // 新建连接超时 500ms
     pool_cfg.timeouts.recycle = Some(Duration::from_millis(t_recycle));  // 取连接前健康检查超时 200ms
     cfg.pool = Some(pool_cfg);
